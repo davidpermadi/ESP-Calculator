@@ -1,0 +1,576 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import display, HTML
+
+class ESPCalculator:
+    """
+    Electrical Submersible Pump (ESP) calculator for artificial lift in offshore oil and gas production.
+    This calculator determines key parameters including pump head, discharge pressure, PBHP, and power requirements.
+    """
+    
+    def __init__(self):
+        # Constants
+        self.g = 9.81  # gravitational acceleration (m/s²)
+        self.efficiency_factors = {
+            'motor': 0.87,        # Motor efficiency
+            'pump': 0.65,         # Pump efficiency
+            'cable': 0.97,        # Cable efficiency
+            'transformer': 0.98,  # Transformer efficiency
+            'vsd': 0.96           # Variable speed drive efficiency
+        }
+        
+        # Initialize results dictionary
+        self.results = {}
+        
+    def set_well_data(self, 
+                     well_depth, 
+                     pump_depth, 
+                     reservoir_pressure, 
+                     bottomhole_temp,
+                     wellhead_pressure,
+                     productivity_index,
+                     desired_flow_rate,
+                     water_cut,
+                     gas_oil_ratio,
+                     oil_api,
+                     water_specific_gravity=1.05,
+                     gas_specific_gravity=0.65):
+        """
+        Set the well and fluid properties data
+        
+        Parameters:
+        -----------
+        well_depth: float
+            Total depth of the well (m)
+        pump_depth: float
+            Depth at which the pump is installed (m)
+        reservoir_pressure: float
+            Current reservoir pressure (bar)
+        bottomhole_temp: float
+            Bottom hole temperature (°C)
+        wellhead_pressure: float
+            Required wellhead pressure (bar)
+        productivity_index: float
+            Well productivity index (m³/day/bar)
+        desired_flow_rate: float
+            Target production rate (m³/day)
+        water_cut: float
+            Water cut (fraction, 0-1)
+        gas_oil_ratio: float
+            Gas-oil ratio (m³/m³)
+        oil_api: float
+            Oil API gravity
+        water_specific_gravity: float, optional
+            Specific gravity of produced water
+        gas_specific_gravity: float, optional
+            Specific gravity of produced gas relative to air
+        """
+        # Convert inputs to base SI units where needed
+        self.well_depth = well_depth  # m
+        self.pump_depth = pump_depth  # m
+        self.reservoir_pressure = reservoir_pressure * 1e5  # bar to Pa
+        self.bottomhole_temp = bottomhole_temp + 273.15  # °C to K
+        self.wellhead_pressure = wellhead_pressure * 1e5  # bar to Pa
+        self.productivity_index = productivity_index / (24 * 3600 * 1e5)  # m³/day/bar to m³/s/Pa
+        self.desired_flow_rate = desired_flow_rate / (24 * 3600)  # m³/day to m³/s
+        self.water_cut = water_cut  # fraction
+        self.gas_oil_ratio = gas_oil_ratio  # m³/m³
+        self.water_specific_gravity = water_specific_gravity
+        self.gas_specific_gravity = gas_specific_gravity
+        
+        # Store oil API and calculate oil specific gravity from API
+        self.oil_api = oil_api
+        self.oil_specific_gravity = 141.5 / (oil_api + 131.5)
+        
+        # Store input data in results
+        self.results['input_data'] = {
+            'well_depth_m': well_depth,
+            'pump_depth_m': pump_depth,
+            'reservoir_pressure_bar': reservoir_pressure,
+            'bottomhole_temp_C': bottomhole_temp,
+            'wellhead_pressure_bar': wellhead_pressure,
+            'productivity_index_m3_day_bar': productivity_index,
+            'desired_flow_rate_m3_day': desired_flow_rate,
+            'water_cut_fraction': water_cut,
+            'gas_oil_ratio_m3_m3': gas_oil_ratio,
+            'oil_api': oil_api
+        }
+        
+        # Calculate fluid properties
+        self._calculate_fluid_properties()
+        
+    def _calculate_fluid_properties(self):
+        """Calculate fluid properties based on the input data"""
+        # Calculate mixed fluid density at pump intake
+        self.oil_density = self.oil_specific_gravity * 1000  # kg/m³
+        self.water_density = self.water_specific_gravity * 1000  # kg/m³
+        
+        # Simplified calculation for liquid mixture density (neglecting gas in solution)
+        self.fluid_density = (1 - self.water_cut) * self.oil_density + self.water_cut * self.water_density
+        
+        # Estimate fluid viscosity (simplified)
+        # In a real application, use proper correlations based on pressure, temperature and fluid composition
+        oil_viscosity = 10 * (141.5 / (self.oil_api + 131.5))**2  # cP, simplified correlation
+        water_viscosity = 0.5  # cP, approximate value
+        
+        # Simplified mixing rule for viscosity
+        self.fluid_viscosity = (1 - self.water_cut) * oil_viscosity + self.water_cut * water_viscosity
+        self.fluid_viscosity = self.fluid_viscosity / 1000  # Convert from cP to Pa·s
+        
+        # Store fluid properties in results
+        self.results['fluid_properties'] = {
+            'oil_density_kg_m3': self.oil_density,
+            'water_density_kg_m3': self.water_density,
+            'mixture_density_kg_m3': self.fluid_density,
+            'mixture_viscosity_Pa_s': self.fluid_viscosity
+        }
+        
+    def calculate_flowing_bottomhole_pressure(self):
+        """Calculate the flowing bottomhole pressure"""
+        # FBHP = Pr - (Q / PI)
+        self.fbhp = self.reservoir_pressure - (self.desired_flow_rate / self.productivity_index)
+        
+        # Convert to bar for display
+        self.results['fbhp_pa'] = self.fbhp
+        self.results['fbhp_bar'] = self.fbhp / 1e5
+        
+        return self.fbhp
+        
+    def calculate_pump_intake_pressure(self):
+        """Calculate the pump intake pressure considering fluid level"""
+        # Calculate static fluid level in the annulus based on FBHP
+        static_head = self.fbhp / (self.fluid_density * self.g)
+        
+        # If FBHP is less than hydrostatic at pump depth, calculate fluid level
+        if static_head < self.pump_depth:
+            self.fluid_level = static_head
+            self.pump_intake_pressure = 0  # Assumes no gas pressure above fluid
+        else:
+            self.fluid_level = self.pump_depth
+            # Extra pressure beyond hydrostatic
+            self.pump_intake_pressure = self.fbhp - (self.fluid_density * self.g * self.pump_depth)
+        
+        # Add hydrostatic pressure from fluid above pump
+        self.pump_intake_pressure += self.fluid_density * self.g * self.fluid_level
+        
+        # Store results
+        self.results['fluid_level_m'] = self.fluid_level
+        self.results['pump_intake_pressure_pa'] = self.pump_intake_pressure
+        self.results['pump_intake_pressure_bar'] = self.pump_intake_pressure / 1e5
+        
+        return self.pump_intake_pressure
+        
+    def calculate_required_pump_head(self):
+        """Calculate the total head required for the ESP pump"""
+        # Friction losses in tubing
+        # Simplified calculation - in a real application, use proper correlations
+        # based on tubing diameter, roughness, fluid properties, and flow regime
+        
+        # Assume 8.89 cm (3.5") tubing ID
+        tubing_id = 0.0889  # m
+        tubing_area = np.pi * (tubing_id/2)**2  # m²
+        fluid_velocity = self.desired_flow_rate / tubing_area  # m/s
+        
+        # Simplified friction factor calculation
+        reynolds_number = (self.fluid_density * fluid_velocity * tubing_id) / self.fluid_viscosity
+        
+        if reynolds_number < 2000:  # Laminar flow
+            friction_factor = 64 / reynolds_number
+        else:  # Turbulent flow - simplified Colebrook approximation
+            relative_roughness = 0.0001 / tubing_id  # Assume roughness of 0.1 mm
+            friction_factor = 0.25 / (np.log10(relative_roughness/3.7 + 5.74/reynolds_number**0.9))**2
+        
+        # Friction loss using Darcy-Weisbach equation
+        friction_loss = friction_factor * (self.pump_depth / tubing_id) * (fluid_velocity**2 / (2 * self.g))
+        
+        # Total dynamic head (TDH) calculation
+        # TDH = vertical lift + friction losses + surface pressure head
+        vertical_lift = self.pump_depth - self.fluid_level  # m
+        surface_pressure_head = self.wellhead_pressure / (self.fluid_density * self.g)  # m
+        
+        self.total_head = vertical_lift + friction_loss + surface_pressure_head
+        
+        # Store results
+        self.results['friction_head_m'] = friction_loss
+        self.results['vertical_lift_m'] = vertical_lift
+        self.results['surface_pressure_head_m'] = surface_pressure_head
+        self.results['total_required_head_m'] = self.total_head
+        
+        return self.total_head
+        
+    def calculate_pump_discharge_pressure(self):
+        """Calculate the pump discharge pressure"""
+        # PDP = PIP + ρgh
+        self.pump_discharge_pressure = self.pump_intake_pressure + (self.fluid_density * self.g * self.total_head)
+        
+        # Store results
+        self.results['pump_discharge_pressure_pa'] = self.pump_discharge_pressure
+        self.results['pump_discharge_pressure_bar'] = self.pump_discharge_pressure / 1e5
+        
+        return self.pump_discharge_pressure
+        
+    def calculate_power_requirements(self):
+        """Calculate the power requirements for the ESP system"""
+        # Hydraulic power (fluid power)
+        hydraulic_power = self.desired_flow_rate * self.fluid_density * self.g * self.total_head
+        
+        # Pump shaft power
+        pump_shaft_power = hydraulic_power / self.efficiency_factors['pump']
+        
+        # Motor power required
+        motor_power = pump_shaft_power / self.efficiency_factors['motor']
+        
+        # Surface power required (considering cable, transformer, and VSD losses)
+        surface_power = motor_power / (self.efficiency_factors['cable'] * 
+                                       self.efficiency_factors['transformer'] * 
+                                       self.efficiency_factors['vsd'])
+        
+        # Store results
+        self.results['hydraulic_power_w'] = hydraulic_power
+        self.results['pump_shaft_power_w'] = pump_shaft_power
+        self.results['motor_power_required_w'] = motor_power
+        self.results['surface_power_required_w'] = surface_power
+        self.results['surface_power_required_hp'] = surface_power / 745.7  # Convert W to HP
+        
+        return surface_power
+        
+    def select_pump_stages(self, head_per_stage=10):
+        """Estimate the number of stages required"""
+        # Simplified calculation based on typical head per stage
+        # In a real application, use actual pump performance curves
+        num_stages = np.ceil(self.total_head / head_per_stage)
+        
+        self.results['estimated_stages'] = num_stages
+        self.results['head_per_stage_m'] = head_per_stage
+        
+        return num_stages
+    
+    def run_calculations(self):
+        """Run all calculations in sequence"""
+        self.calculate_flowing_bottomhole_pressure()
+        self.calculate_pump_intake_pressure()
+        self.calculate_required_pump_head()
+        self.calculate_pump_discharge_pressure()
+        self.calculate_power_requirements()
+        self.select_pump_stages()
+        
+        return self.results
+    
+    def generate_report(self):
+        """Generate a formatted report of the results"""
+        report = """
+        <h2>ESP Sizing Calculation Report</h2>
+        <h3>Input Data</h3>
+        <table border="1">
+        """
+        
+        for key, value in self.results['input_data'].items():
+            report += f"<tr><td>{key.replace('_', ' ').title()}</td><td>{value}</td></tr>"
+        
+        report += """
+        </table>
+        <h3>Fluid Properties</h3>
+        <table border="1">
+        """
+        
+        for key, value in self.results['fluid_properties'].items():
+            report += f"<tr><td>{key.replace('_', ' ').title()}</td><td>{value:.2f}</td></tr>"
+        
+        report += """
+        </table>
+        <h3>Calculation Results</h3>
+        <table border="1">
+        """
+        
+        # Add all other results except the input_data and fluid_properties already shown
+        for key, value in self.results.items():
+            if key not in ['input_data', 'fluid_properties']:
+                if isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        report += f"<tr><td>{subkey.replace('_', ' ').title()}</td><td>{subvalue:.2f}</td></tr>"
+                else:
+                    report += f"<tr><td>{key.replace('_', ' ').title()}</td><td>{value:.2f}</td></tr>"
+        
+        report += """
+        </table>
+        """
+        
+        return report
+
+# Example usage
+if __name__ == "__main__":
+    # Create ESP calculator instance
+    esp = ESPCalculator()
+    
+    # Set well data (example values)
+    esp.set_well_data(
+        well_depth=2500,              # m
+        pump_depth=2200,              # m
+        reservoir_pressure=180,       # bar
+        bottomhole_temp=90,           # °C
+        wellhead_pressure=20,         # bar
+        productivity_index=5,         # m³/day/bar
+        desired_flow_rate=150,        # m³/day
+        water_cut=0.4,                # fraction
+        gas_oil_ratio=50,             # m³/m³
+        oil_api=35                    # API
+    )
+    
+    # Run calculations
+    results = esp.run_calculations()
+    
+    # Print formatted results
+    print("\nESP CALCULATION RESULTS:")
+    print("==============================================")
+    print(f"FBHP: {results['fbhp_bar']:.2f} bar")
+    print(f"Pump Intake Pressure: {results['pump_intake_pressure_bar']:.2f} bar")
+    print(f"Required Pump Head: {results['total_required_head_m']:.2f} m")
+    print(f"Pump Discharge Pressure: {results['pump_discharge_pressure_bar']:.2f} bar")
+    print(f"Power Required: {results['surface_power_required_w']/1000:.2f} kW ({results['surface_power_required_hp']:.2f} HP)")
+    print(f"Estimated Stages Required: {results['estimated_stages']:.0f}")
+    
+    # Generate HTML report
+    report_html = esp.generate_report()
+    display(HTML(report_html))
+    
+    # Plot key results
+    fig, ax = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Pressure profile
+    ax[0, 0].bar(['Reservoir', 'FBHP', 'Pump Intake', 'Pump Discharge', 'Wellhead'], 
+              [results['input_data']['reservoir_pressure_bar'], 
+               results['fbhp_bar'], 
+               results['pump_intake_pressure_bar'], 
+               results['pump_discharge_pressure_bar'], 
+               results['input_data']['wellhead_pressure_bar']])
+    ax[0, 0].set_title('Pressure Profile (bar)')
+    ax[0, 0].set_ylabel('Pressure (bar)')
+    ax[0, 0].grid(True)
+    
+    # Head components
+    ax[0, 1].bar(['Vertical Lift', 'Friction', 'Surface Pressure', 'Total Head'], 
+              [results['vertical_lift_m'], 
+               results['friction_head_m'], 
+               results['surface_pressure_head_m'], 
+               results['total_required_head_m']])
+    ax[0, 1].set_title('Head Components (m)')
+    ax[0, 1].set_ylabel('Head (m)')
+    ax[0, 1].grid(True)
+    
+    # Power components
+    ax[1, 0].bar(['Hydraulic', 'Pump Shaft', 'Motor Input', 'Surface Required'], 
+              [results['hydraulic_power_w']/1000, 
+               results['pump_shaft_power_w']/1000, 
+               results['motor_power_required_w']/1000, 
+               results['surface_power_required_w']/1000])
+    ax[1, 0].set_title('Power Components (kW)')
+    ax[1, 0].set_ylabel('Power (kW)')
+    ax[1, 0].grid(True)
+    
+    # Fluid distribution
+    ax[1, 1].pie([1-results['input_data']['water_cut_fraction'], 
+                results['input_data']['water_cut_fraction']], 
+               labels=['Oil', 'Water'], 
+               autopct='%1.1f%%')
+    ax[1, 1].set_title('Fluid Composition')
+    
+    plt.tight_layout()
+    plt.show()
+
+def run_sensitivity_analysis():
+    """Run a sensitivity analysis on key parameters"""
+    # Base case
+    esp = ESPCalculator()
+    esp.set_well_data(
+        well_depth=2500,              # m
+        pump_depth=2200,              # m
+        reservoir_pressure=180,       # bar
+        bottomhole_temp=90,           # °C
+        wellhead_pressure=20,         # bar
+        productivity_index=5,         # m³/day/bar
+        desired_flow_rate=150,        # m³/day
+        water_cut=0.4,                # fraction
+        gas_oil_ratio=50,             # m³/m³
+        oil_api=35                    # API
+    )
+    base_results = esp.run_calculations()
+    
+    # Parameters to analyze
+    flow_rates = np.linspace(100, 300, 5)  # m³/day
+    water_cuts = np.linspace(0.1, 0.9, 5)  # fraction
+    
+    # Results storage
+    power_vs_flow = []
+    head_vs_flow = []
+    power_vs_wc = []
+    head_vs_wc = []
+    
+    # Flow rate sensitivity
+    for flow in flow_rates:
+        esp = ESPCalculator()
+        esp.set_well_data(
+            well_depth=2500, pump_depth=2200, reservoir_pressure=180,
+            bottomhole_temp=90, wellhead_pressure=20, productivity_index=5,
+            desired_flow_rate=flow, water_cut=0.4, gas_oil_ratio=50, oil_api=35
+        )
+        results = esp.run_calculations()
+        power_vs_flow.append(results['surface_power_required_w']/1000)  # kW
+        head_vs_flow.append(results['total_required_head_m'])
+    
+    # Water cut sensitivity
+    for wc in water_cuts:
+        esp = ESPCalculator()
+        esp.set_well_data(
+            well_depth=2500, pump_depth=2200, reservoir_pressure=180,
+            bottomhole_temp=90, wellhead_pressure=20, productivity_index=5,
+            desired_flow_rate=150, water_cut=wc, gas_oil_ratio=50, oil_api=35
+        )
+        results = esp.run_calculations()
+        power_vs_wc.append(results['surface_power_required_w']/1000)  # kW
+        head_vs_wc.append(results['total_required_head_m'])
+    
+    # Plot sensitivity analysis
+    fig, ax = plt.subplots(2, 2, figsize=(12, 10))
+    
+    ax[0, 0].plot(flow_rates, power_vs_flow, 'o-')
+    ax[0, 0].set_title('Power vs Flow Rate')
+    ax[0, 0].set_xlabel('Flow Rate (m³/day)')
+    ax[0, 0].set_ylabel('Power Required (kW)')
+    ax[0, 0].grid(True)
+    
+    ax[0, 1].plot(flow_rates, head_vs_flow, 'o-')
+    ax[0, 1].set_title('Head vs Flow Rate')
+    ax[0, 1].set_xlabel('Flow Rate (m³/day)')
+    ax[0, 1].set_ylabel('Total Head Required (m)')
+    ax[0, 1].grid(True)
+    
+    ax[1, 0].plot(water_cuts, power_vs_wc, 'o-')
+    ax[1, 0].set_title('Power vs Water Cut')
+    ax[1, 0].set_xlabel('Water Cut (fraction)')
+    ax[1, 0].set_ylabel('Power Required (kW)')
+    ax[1, 0].grid(True)
+    
+    ax[1, 1].plot(water_cuts, head_vs_wc, 'o-')
+    ax[1, 1].set_title('Head vs Water Cut')
+    ax[1, 1].set_xlabel('Water Cut (fraction)')
+    ax[1, 1].set_ylabel('Total Head Required (m)')
+    ax[1, 1].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Run the sensitivity analysis
+# Uncomment the following line to run the sensitivity analysis
+# run_sensitivity_analysis()
+
+# Interactive input functionality (for Google Colab)
+def interactive_esp_calculation():
+    from ipywidgets import widgets
+    from IPython.display import display, clear_output
+    
+    # Create input widgets
+    well_depth = widgets.FloatText(value=2500, description='Well Depth (m):', style={'description_width': 'initial'})
+    pump_depth = widgets.FloatText(value=2200, description='Pump Depth (m):', style={'description_width': 'initial'})
+    reservoir_pressure = widgets.FloatText(value=180, description='Reservoir Pressure (bar):', style={'description_width': 'initial'})
+    bottomhole_temp = widgets.FloatText(value=90, description='Bottomhole Temp (°C):', style={'description_width': 'initial'})
+    wellhead_pressure = widgets.FloatText(value=20, description='Wellhead Pressure (bar):', style={'description_width': 'initial'})
+    productivity_index = widgets.FloatText(value=5, description='Productivity Index (m³/day/bar):', style={'description_width': 'initial'})
+    desired_flow_rate = widgets.FloatText(value=150, description='Flow Rate (m³/day):', style={'description_width': 'initial'})
+    water_cut = widgets.FloatSlider(value=0.4, min=0.0, max=1.0, step=0.05, description='Water Cut:', style={'description_width': 'initial'})
+    gas_oil_ratio = widgets.FloatText(value=50, description='GOR (m³/m³):', style={'description_width': 'initial'})
+    oil_api = widgets.FloatText(value=35, description='Oil API:', style={'description_width': 'initial'})
+    
+    calculate_button = widgets.Button(description='Calculate ESP Requirements')
+    output = widgets.Output()
+    
+    # Layout
+    input_widgets = widgets.VBox([
+        widgets.HBox([well_depth, pump_depth]),
+        widgets.HBox([reservoir_pressure, bottomhole_temp]),
+        widgets.HBox([wellhead_pressure, productivity_index]),
+        widgets.HBox([desired_flow_rate, water_cut]),
+        widgets.HBox([gas_oil_ratio, oil_api]),
+        calculate_button
+    ])
+    
+    # Calculate function
+    def on_calculate_button_clicked(_):
+        with output:
+            clear_output()
+            
+            # Create ESP calculator instance
+            esp = ESPCalculator()
+            
+            # Set well data from widgets
+            esp.set_well_data(
+                well_depth=well_depth.value,
+                pump_depth=pump_depth.value,
+                reservoir_pressure=reservoir_pressure.value,
+                bottomhole_temp=bottomhole_temp.value,
+                wellhead_pressure=wellhead_pressure.value,
+                productivity_index=productivity_index.value,
+                desired_flow_rate=desired_flow_rate.value,
+                water_cut=water_cut.value,
+                gas_oil_ratio=gas_oil_ratio.value,
+                oil_api=oil_api.value
+            )
+            
+            # Run calculations
+            results = esp.run_calculations()
+            
+            # Display HTML report
+            report_html = esp.generate_report()
+            display(HTML(report_html))
+            
+            # Plot key results
+            fig, ax = plt.subplots(2, 2, figsize=(12, 10))
+            
+            # Pressure profile
+            ax[0, 0].bar(['Reservoir', 'FBHP', 'Pump Intake', 'Pump Discharge', 'Wellhead'], 
+                      [results['input_data']['reservoir_pressure_bar'], 
+                       results['fbhp_bar'], 
+                       results['pump_intake_pressure_bar'], 
+                       results['pump_discharge_pressure_bar'], 
+                       results['input_data']['wellhead_pressure_bar']])
+            ax[0, 0].set_title('Pressure Profile (bar)')
+            ax[0, 0].set_ylabel('Pressure (bar)')
+            ax[0, 0].grid(True)
+            
+            # Head components
+            ax[0, 1].bar(['Vertical Lift', 'Friction', 'Surface Pressure', 'Total Head'], 
+                      [results['vertical_lift_m'], 
+                       results['friction_head_m'], 
+                       results['surface_pressure_head_m'], 
+                       results['total_required_head_m']])
+            ax[0, 1].set_title('Head Components (m)')
+            ax[0, 1].set_ylabel('Head (m)')
+            ax[0, 1].grid(True)
+            
+            # Power components
+            ax[1, 0].bar(['Hydraulic', 'Pump Shaft', 'Motor Input', 'Surface Required'], 
+                      [results['hydraulic_power_w']/1000, 
+                       results['pump_shaft_power_w']/1000, 
+                       results['motor_power_required_w']/1000, 
+                       results['surface_power_required_w']/1000])
+            ax[1, 0].set_title('Power Components (kW)')
+            ax[1, 0].set_ylabel('Power (kW)')
+            ax[1, 0].grid(True)
+            
+            # Fluid distribution
+            ax[1, 1].pie([1-results['input_data']['water_cut_fraction'], 
+                        results['input_data']['water_cut_fraction']], 
+                       labels=['Oil', 'Water'], 
+                       autopct='%1.1f%%')
+            ax[1, 1].set_title('Fluid Composition')
+            
+            plt.tight_layout()
+            plt.show()
+    
+    calculate_button.on_click(on_calculate_button_clicked)
+    
+    # Display everything
+    display(input_widgets, output)
+
+# Uncomment the following line to run the interactive version in Google Colab
+# interactive_esp_calculation()
